@@ -44,7 +44,7 @@ import open3d as o3d
 
 SRC_INPUT_IMAGE_PATH = "images/lamp.jpeg"  # image to generate 3D from
 # TAR_IMAGE_PATH       = "images/image_sofa1.png" # image used as target condition
-TEXT_PROMPT          = "Take the provided 3D model of a street-style lamp images/lamp.jpeg and modify only the bulb enclosure. Keep the base, pole, arm curvature, proportions, materials, and overall design identical. Change the bulb housing from a short rounded dome into a longer, vertically elongated dome shape. The new bulb cover should extend further downward,Ensure smooth continuity with the existing fixture and preserve the original style and scale. Do not alter any other part of the lamp. Only modify the bulb geometry; all other vertices, dimensions, and components must remain unchanged." # region to edit
+TEXT_PROMPT          = " modify only the bulb enclosure. Keep the base, pole, arm curvature, proportions, materials, and overall design identical. Change the bulb housing from a short rounded dome into a longer, vertically elongated downward side and dome shape. mask should extend further downward,Ensure smooth continuity with the existing fixture and preserve the original style and scale. Do not mask any other part of the lamp. " # region to edit
 OUTPUT_DIR           = "outputs/new_pipeline"
 
 EDITING_SEED   = 1
@@ -99,8 +99,8 @@ def run_with_mask(
     slat_sampler_params             = slat_sampler_params or {}
 
     src_img = Image.open(src_image_path)
-    thick_img = Image.open("/data/home/divya1/projects/assign/Nano3D/images/lamp1.jpeg")
-    thin_image = Image.open("/data/home/divya1/projects/assign/Nano3D/images/lamp.jpeg")
+    thick_img = Image.open("/data/home/divya1/projects/assign/Nano3D/images/image_sofa1.png")
+    thin_image = Image.open("/data/home/divya1/projects/assign/Nano3D/images/image_sofa.png")
     if preprocess_image:
         src_img = pipeline.preprocess_image(src_img)
         thick_img = pipeline.preprocess_image(thick_img)
@@ -108,10 +108,10 @@ def run_with_mask(
 
     src_cond = pipeline.get_cond([src_img])
 
-    tar_cond1 = pipeline.get_cond([thick_img])
-    tar_cond2 = pipeline.get_cond([thin_image])
+    thick_cond = pipeline.get_cond([thick_img])
+    thin_cond = pipeline.get_cond([thin_image])
 
-    tar_cond["cond"] = tar_cond1["cond"] - tar_cond2["cond"]
+    tar_cond["cond"] = thick_cond["cond"] - thin_cond["cond"]
     tar_cond["neg_cond"] = torch.zeros_like(tar_cond["cond"])
 
     src_voxel_latent = torch.load(src_voxel_latent_path, weights_only=False)
@@ -122,7 +122,7 @@ def run_with_mask(
     cube_mask_grid = proc.ply_to_voxel(cube_mask_ply_path)  # dense bbox of edit region
     v_src          = proc.ply_to_voxel(src_ply_path)        # source geometry
 
-    alphas     = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
+    alphas     = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0, 1.2, 1.5]
     all_results = {}
 
     for alpha in alphas:
@@ -133,8 +133,11 @@ def run_with_mask(
         # ── interpolate conditions ────────────────────────────────────────────
         cur_tar_cond = copy.deepcopy(tar_cond)
         cur_tar_cond["cond"] = (
-            src_cond["cond"] + alpha * (tar_cond["cond"] - src_cond["cond"])
+            src_cond["cond"] + alpha * (tar_cond["cond"] )
         )
+        src_norm = src_cond["cond"].norm(dim=-1, keepdim=True).clamp(min=1e-8)
+        cur_norm = cur_tar_cond["cond"].norm(dim=-1, keepdim=True).clamp(min=1e-8)
+        cur_tar_cond["cond"] = cur_tar_cond["cond"] * (src_norm / cur_norm)
 
         # ── sample new sparse structure (geometry) ────────────────────────────
         torch.manual_seed(seed)
@@ -290,17 +293,17 @@ if __name__ == "__main__":
     print("="*60)
 
 
-    thick_image = Image.open("/data/home/divya1/projects/assign/Nano3D/images/image_sofa1.png")
-    thin_image = Image.open("/data/home/divya1/projects/assign/Nano3D/images/image_sofa.png")
+    # thick_image = Image.open("/data/home/divya1/projects/assign/Nano3D/images/image_sofa1.png")
+    # thin_image = Image.open("/data/home/divya1/projects/assign/Nano3D/images/image_sofa.png")
   
-    thick_img = pipeline.preprocess_image(thick_image)
-    thin_image = pipeline.preprocess_image(thin_image)
+    # thick_img = pipeline.preprocess_image(thick_image)
+    # thin_image = pipeline.preprocess_image(thin_image)
 
-    tar_cond1 = pipeline.get_cond([thick_image])
-    tar_cond2 = pipeline.get_cond([thin_image])
-    tar_cond = {}
-    tar_cond["cond"] = tar_cond1["cond"] - tar_cond2["cond"]
-    tar_cond["neg_cond"] = torch.zeros_like(tar_cond["cond"])
+    # tar_cond1 = pipeline.get_cond([thick_image])
+    # tar_cond2 = pipeline.get_cond([thin_image])
+    # tar_cond = {}
+    # tar_cond["cond"] = tar_cond1["cond"] - tar_cond2["cond"]
+    # tar_cond["neg_cond"] = torch.zeros_like(tar_cond["cond"])
  
 
     # ── STEP 5: Editing with text-guided mask ─────────────────────────────────
@@ -314,7 +317,7 @@ if __name__ == "__main__":
         src_ply_path           = os.path.join(OUTPUT_DIR, "voxels.ply"),
         src_voxel_latent_path  = os.path.join(OUTPUT_DIR, "latent.pt"),
         src_slat               = src_slat,
-        tar_cond               = tar_cond,
+       
         mask_ply_path          = mask_result["mask_ply"],
         cube_mask_ply_path     = mask_result["cube_mask_ply"],
         seed                   = EDITING_SEED,

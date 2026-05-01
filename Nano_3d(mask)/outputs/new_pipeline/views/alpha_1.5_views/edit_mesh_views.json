@@ -1,0 +1,23 @@
+{
+    "glb": "outputs/new_pipeline/alpha_1.5/edit_mesh.glb",
+    "fov_degrees": 40.0,
+    "radius": 2.0,
+    "views": {
+        "front": {
+            "yaw_deg": -90.0,
+            "path": "outputs/new_pipeline/views/alpha_1.5_views/edit_mesh_front.png"
+        },
+        "back": {
+            "yaw_deg": 90.0,
+            "path": "outputs/new_pipeline/views/alpha_1.5_views/edit_mesh_back.png"
+        },
+        "right": {
+            "yaw_deg": 0.0,
+            "path": "outputs/new_pipeline/views/alpha_1.5_views/edit_mesh_right.png"
+        },
+        "left": {
+            "yaw_deg": 180.0,
+            "path": "outputs/new_pipeline/views/alpha_1.5_views/edit_mesh_left.png"
+        }
+    }
+}
