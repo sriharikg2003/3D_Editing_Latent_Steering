@@ -1,179 +1,213 @@
-# Nano3D: A Training-Free Approach for Efficient 3D Editing Without Masks
+# Text-Guided 3D Editing Without a Reference Image
 
-[**Paper**](https://arxiv.org/abs/2510.15019) | [**Project Page**](https://jamesyjl.github.io/Nano3D/) | [**Datasets**](https://huggingface.co/datasets/yejunliang23/Nano3D-Edit-100k)
+**DLCV Course Project** — Divya & Srihari K G
 
-Official implementation of Nano3D: A Training-Free Approach for Efficient 3D Editing Without Masks
+This project extends [Nano3D](https://arxiv.org/abs/2510.15019) (built on [TRELLIS](https://github.com/microsoft/TRELLIS)) to enable 3D object editing using only a **text prompt** — no pre-edited reference image required.
 
-[Junliang Ye*](https://jamesyjl.github.io/), [Shenghao Xie*](https://shxie2020.github.io/), [Ruowen Zhao](https://zhaorw02.github.io/), [Zhengyi Wang](https://thuwzy.github.io/), [Hongyu Yan](https://scholar.google.com/citations?user=TeKnXhkAAAAJ&hl=en&oi=ao), Wenqiang Zu, Lei Ma, [Jun Zhu](https://ml.cs.tsinghua.edu.cn/~jun/index.shtml).
+---
 
-https://github.com/user-attachments/assets/1a382c9f-956b-4501-864d-f2838211b360
+## Overview
 
-Abstract: *3D object editing is essential for interactive content creation in gaming, animation, and robotics, yet current approaches remain inefficient, inconsistent, and often fail to preserve unedited regions. Most methods rely on editing multi-view renderings followed by reconstruction, which introduces artifacts and limits practicality. To address these challenges, we propose **Nano3D**, a training-free framework for precise and coherent 3D object editing without masks. Nano3D integrates FlowEdit into TRELLIS to perform localized edits guided by front-view renderings, and further introduces region-aware merging strategies, Voxel/Slat-Merge, which adaptively preserve structural fidelity by ensuring consistency between edited and unedited areas. Experiments demonstrate that Nano3D achieves superior 3D consistency and visual quality compared with existing methods. Based on this framework, we construct the first large-scale 3D editing datasets **Nano3D-Edit-100k**, which contains over 100,000 high-quality 3D editing pairs. This work addresses long-standing challenges in both algorithm design and data availability, significantly improving the generality and reliability of 3D editing, and laying the groundwork for the development of feed-forward 3D editing models.*
+The original Nano3D requires a manually or automatically edited 2D image to guide the 3D edit. We remove this bottleneck by automatically generating a 3D voxel mask from a text description of the region to edit. A latent direction vector then drives the geometry and appearance change, while everything outside the masked region is preserved exactly.
 
-<p align="center">
-    <img src="assets/teaser.png">
-</p>
+```
+Input: source image  +  text prompt ("the bulb")
+Output: edited 3D mesh (GLB) at multiple edit strengths (α = 0.0 → 1.0)
+```
+
+---
+
+## New Files
+
+| File | Description |
+|------|-------------|
+| `new_pipeline.py` | End-to-end pipeline: image + text → edited 3D mesh |
+| `inference/create_mask.py` | Text-guided 3D voxel mask (GDINO + SAM + ray casting + dilation) |
+| `new_mask.py` | Standalone CLIPSeg utility for 2D mask visualisation |
+
+---
 
 ## Installation
 
-### Basic Environment
+### Base Environment
 
-Follow the [TRELLIS](https://github.com/microsoft/TRELLIS) installation guide to set up the base environment. Then install the additional dependency:
+Follow the [TRELLIS installation guide](https://github.com/microsoft/TRELLIS) to set up the base environment, then install:
 
 ```bash
 pip install bpy==4.0.0 --extra-index-url https://download.blender.org/pypi/
+pip install transformers scipy
 ```
 
-### Optional: Local Image Editing with Qwen-Image
+The mask pipeline downloads these models automatically from Hugging Face on first run:
+- `IDEA-Research/grounding-dino-base`
+- `facebook/sam-vit-base`
+- `CIDAS/clipseg-rd64-refined` (used by `new_mask.py` only)
 
-If you want to run image editing locally (instead of providing pre-edited images), additional setup is required:
+---
 
-- **torch >= 2.5.1**
-- Configure the Qwen-Image environment following the official guide [Qwen-Image-Lightning](https://github.com/ModelTC/Qwen-Image-Lightning)
-- **At least 60GB GPU VRAM** is required
+## Running the New Pipeline
 
-Then download the Qwen-Image-Lightning LoRA weights:
+### `new_pipeline.py` — Image + Text → Edited 3D Mesh
+
+Edit the configuration block at the top of the file:
+
+```python
+SRC_INPUT_IMAGE_PATH = "images/lamp.jpeg"   # source image
+TEXT_PROMPT          = "the bulb"           # region to edit
+OUTPUT_DIR           = "outputs/new_pipeline"
+
+EDITING_SEED         = 1
+ST_STEP              = 12    # edit aggressiveness (higher = bigger geometry change)
+DILATION_VOXELS      = 10   # how far to expand the 3D mask outward (in voxels)
+```
+
+Then run:
 
 ```bash
-huggingface-cli download lightx2v/Qwen-Image-Lightning \
-    Qwen-Image-Edit-2509/Qwen-Image-Edit-2509-Lightning-8steps-V1.0-fp32.safetensors \
-    --local-dir ./Qwen-Image-Lightning
+python new_pipeline.py
+```
+
+### How it works — step by step
+
+**Step 1 — Generate 3D from source image**
+
+`run_custom` passes the source image through TRELLIS to produce a sparse voxel structure, structured latent (SLAT), and an initial mesh saved as `src_mesh.glb`.
+
+**Step 2 — Render front view**
+
+The generated mesh is rendered from the front. The render and its camera metadata (`front_metadata.json`) are saved to `outputs/image/` and are used by the ray caster in the next step.
+
+**Step 3 — Create 3D voxel mask from text prompt**
+
+`create_mask_3d` builds a 3D mask in four stages:
+
+```
+Text prompt
+    │
+    ▼
+Grounding DINO  ──→  Smallest valid bounding box on the source image
+    │
+    ▼
+SAM             ──→  2D binary mask on the rendered front view
+    │
+    ▼
+Ray casting     ──→  3D surface mask (first-hit voxel per masked pixel)
+    │
+    ▼
+3D dilation     ──→  Dilated voxel mask  +  dense bounding-box cube mask
+```
+
+- **Grounding DINO** selects the *smallest* box above the score threshold, not the highest-confidence one — this avoids the common failure where the top-scoring box covers the whole object.
+- **SAM** segments the rescaled bounding box on the rendered view (not the source image) so the 2D mask is geometrically aligned with the 3D voxel grid.
+- **Ray casting** fires one ray per masked pixel from the camera, stopping at the first occupied voxel.
+- **3D dilation** expands the surface mask with a spherical kernel to capture interior voxels unreachable from a single viewpoint. A tight axis-aligned bounding box (cube mask) is also computed for use in SLAT merge.
+
+**Step 4 — Build conditioning direction**
+
+Instead of a single target image, a *direction* in DINOv2 embedding space is computed:
+
+```
+direction = encode(tar_image) − encode(src_image)
+```
+
+This direction captures the semantic change (e.g. thin → thick, short → tall) without requiring an edited version of the specific input object.
+
+**Step 5 — Alpha-loop editing**
+
+For each α ∈ {0.0, 0.2, 0.4, 0.6, 0.8, 1.0}:
+
+1. Interpolate conditioning: `cur_cond = src_cond + α × direction`
+2. Sample new sparse structure (geometry) with FlowEdit using `cur_cond`
+3. **Voxel merge** — inside text mask → new geometry; outside → original source geometry
+4. Sample new SLAT (appearance) on merged voxel coordinates
+5. **SLAT merge** — inside cube mask → new appearance features; outside → original source features
+6. Decode and export `edit_mesh.glb`
+
+The α sweep lets you inspect the full range from no change (α = 0) to full edit strength (α = 1).
+
+### Output structure
+
+```
+outputs/new_pipeline/
+├── src_mesh.glb                   source mesh
+├── image/
+│   ├── front.png                  rendered front view
+│   └── front_metadata.json        camera parameters for ray casting
+├── mask/
+│   ├── mask_2d.png                2D segmentation mask (debug)
+│   ├── mask.ply                   dilated 3D voxel mask
+│   └── cube_mask.ply              dense bounding-box cube mask
+├── alpha_0.0/
+│   ├── edit_mesh.glb
+│   ├── edit_voxel.ply             raw geometry from FlowEdit
+│   ├── edit_voxel_merged.ply      geometry after voxel merge
+│   └── slat_merge_viz.ply         red=edited  green=preserved  grey=new
+├── alpha_0.2/
+│   └── ...
+└── alpha_1.0/
+    └── ...
 ```
 
 ---
 
-## Gradio Demo
+## Standalone 2D Mask Check (`new_mask.py`)
 
-We provide an interactive Gradio interface via `app.py`. There are 4 supported configurations:
+Before running the full pipeline, you can sanity-check what a text prompt selects in 2D using CLIPSeg:
 
-| Case | Qwen-Image | Input Type | Description |
-|------|-----------|------------|-------------|
-| 1 | Enabled | 3D Mesh | Direct 3D editing with auto image editing |
-| 2 | Enabled | Image | Image-to-3D, then 3D editing with auto image editing |
-| 3 | Disabled | 3D Mesh | Direct 3D editing (provide your own edited image) |
-| 4 | Disabled | Image | Image-to-3D, then 3D editing (provide your own edited image) |
-
-**Case 1** — Qwen-Image enabled, input: 3D mesh:
 ```bash
-python3 app.py --use-qwen-image --input-mesh \
-    --qwen-image-lora-path "/path/to/Qwen-Image-Edit-2509-Lightning-8steps-V1.0-fp32.safetensors"
+python new_mask.py
+# Edit IMAGE_PATH and PROMPT at the bottom of the file.
 ```
 
-**Case 2** — Qwen-Image enabled, input: image:
-```bash
-python3 app.py --use-qwen-image \
-    --qwen-image-lora-path "/path/to/Qwen-Image-Edit-2509-Lightning-8steps-V1.0-fp32.safetensors"
-```
+Saves three files in the current directory:
+- `comparison_plot.png` — source image side-by-side with the mask heatmap
+- `heatmap_mask.png` — continuous confidence heatmap
+- `binary_mask.png` — thresholded black-and-white mask
 
-**Case 3** — Qwen-Image disabled, input: 3D mesh:
-```bash
-python3 app.py --input-mesh
-```
+---
 
-**Case 4** — Qwen-Image disabled, input: image:
-```bash
-python3 app.py
+## `create_mask_3d` API Reference
+
+```python
+from inference.create_mask import create_mask_3d
+
+result = create_mask_3d(
+    image_path       = "images/lamp.jpeg",    # source image for GDINO detection
+    text_prompt      = "the bulb",            # region to edit
+    render_dir       = "outputs/image",       # directory with front.png + front_metadata.json
+    voxel_ply_path   = "outputs/voxels.ply",  # source voxel grid from TRELLIS generation
+    output_dir       = "outputs/mask",
+    grid_size        = 64,
+    dilation_voxels  = 10,                    # 3D expansion radius in voxels
+    dilation_pixels  = 4,                     # 2D mask expansion before projection
+    score_threshold  = 0.2,                   # GDINO confidence threshold
+)
+
+# Returns:
+# result["mask_ply"]    — path to dilated 3D voxel mask (.ply)
+# result["mask_2d_png"] — path to 2D segmentation mask
+# result["n_masked"]    — number of active voxels
 ```
 
 ---
 
-## Inference Scripts
+## Comparison with Original Nano3D
 
-Two inference scripts are provided depending on your input type.
-
-### `inference.py` — Input: 3D Mesh
-
-Takes an existing GLB mesh as input and edits it directly.
-
-> **Note on consistency:** When using a 3D mesh as input, editing consistency may be lower. This is a known limitation of TRELLIS's render-projection encoding scheme — as discussed in the Nano3D paper, this pipeline is better suited for constructing editing datasets than for producing high-fidelity interactive edits. If you need more consistent results, you have two options:
-> 1. **Use image input instead** (`inference2.py`): the image → 3D → edit pipeline avoids render-projection entirely, yielding more consistent editing pairs. This is how the Nano3D-Edit-100k dataset was built.
-> 2. **Stay tuned for Nano3D-v2**, which will address this limitation.
-
-**Case 1** — With Qwen-Image (automatic image editing):
-```bash
-python3 inference.py \
-    --src_mesh_path /path/to/source.glb \
-    --output_dir ./output \
-    --editing_mode add \
-    --using_qwen_image \
-    --edit_instruction "add a hat on the head." \
-    --lora_path /path/to/Qwen-Image-Edit-2509-Lightning-8steps-V1.0-fp32.safetensors
-```
-
-**Case 2** — Without Qwen-Image (provide your own edited image):
-```bash
-python3 inference.py \
-    --src_mesh_path /path/to/source.glb \
-    --output_dir ./output \
-    --editing_mode add \
-    --edit_instruction "" \
-    --lora_path ""
-```
-> Without `--using_qwen_image`, the script will prompt you to enter the path of your pre-edited image.
-
-### `inference2.py` — Input: Image
-
-Takes a single image as input, first reconstructs a 3D mesh via TRELLIS, then performs editing.
-
-**Case 3** — With Qwen-Image (automatic image editing):
-```bash
-python3 inference2.py \
-    --src_input_image_path /path/to/source.png \
-    --output_dir ./output \
-    --editing_mode add \
-    --using_qwen_image \
-    --edit_instruction "add a hat on the head." \
-    --lora_path /path/to/Qwen-Image-Edit-2509-Lightning-8steps-V1.0-fp32.safetensors
-```
-
-**Case 4** — Without Qwen-Image (provide your own edited image):
-```bash
-python3 inference2.py \
-    --src_input_image_path /path/to/source.png \
-    --output_dir ./output \
-    --editing_mode add \
-    --edit_instruction "" \
-    --lora_path ""
-```
-> Without `--using_qwen_image`, the script will prompt you to enter the path of your pre-edited image.
-
-### Arguments
-
-| Argument | Description |
-|----------|-------------|
-| `--src_mesh_path` | Path to the source GLB mesh (`inference.py` only) |
-| `--src_input_image_path` | Path to the source image (`inference2.py` only) |
-| `--output_dir` | Directory to save all outputs |
-| `--editing_mode` | Editing type: `add`, `remove`, or `replace` |
-| `--using_qwen_image` | Flag. Add this argument to enable Qwen-Image for auto image editing; omit it to provide your own edited image |
-| `--edit_instruction` | Natural language instruction for Qwen-Image editing |
-| `--lora_path` | Path to the Qwen-Image-Lightning LoRA weights |
-
-The output `edit_mesh.glb` will be saved in `--output_dir`.
-
-## Method
-
-Overall Framework of Nano3D. The original 3D object is voxelized and encoded into sparse structure and structured latent respectively. Stage 1 modifies geometry via Flow Transformer with FlowEdit, guided by Nano Banana–edited images. Stage 2 generates structured latents with Sparse Flow Transformer, supporting TRELLIS-inherent appearance editing. Voxel/Slat-Merge further ensures consistency across both stages before decoding the final 3D object.
-<p align="center">
-    <img src="assets/method.png">
-</p>
-
-## Result
-
-We present three edit types—object removal, addition, and replacement. In each case, Nano3D confines changes to the target region (red dashed circles) and produces view-consistent edits, while leaving the rest of the scene unchanged. Geometry stays sharp and textures remain faithful in unedited areas, with no noticeable artifacts.
-<p align="center">
-    <img src="assets/result1.png">
-</p>
+| | Original Nano3D | This Work |
+|---|---|---|
+| Edit signal | Pre-edited image (Qwen-Image or manual) | Text prompt only |
+| Region mask | None — global FlowEdit | Text-guided 3D voxel mask |
+| Geometry merge | `filter_edit_regions` | Voxel mask gates merge |
+| SLAT merge | Coordinate-based | Cube mask gates merge |
+| Conditioning | Single target image embedding | `tar − src` direction vector |
+| Alpha sweep | Single output | 6 outputs at α = 0.0 … 1.0 |
 
 ---
 
-## BibTeX
+## Built On
 
-```bibtex
-@article{ye2025nano3d,
-  title={NANO3D: A Training-Free Approach for Efficient 3D Editing Without Masks},
-  author={Ye, Junliang and Xie, Shenghao and Zhao, Ruowen and Wang, Zhengyi and Yan, Hongyu and Zu, Wenqiang and Ma, Lei and Zhu, Jun},
-  journal={arXiv preprint arXiv:2510.15019},
-  year={2025}
-}
-```
+- [TRELLIS](https://github.com/microsoft/TRELLIS) — sparse 3D generation backbone
+- [Nano3D](https://arxiv.org/abs/2510.15019) — FlowEdit integration and Voxel/Slat-Merge
+- [Grounding DINO](https://huggingface.co/IDEA-Research/grounding-dino-base) — open-vocabulary detection
+- [SAM](https://huggingface.co/facebook/sam-vit-base) — segment anything model
+- [CLIPSeg](https://huggingface.co/CIDAS/clipseg-rd64-refined) — text-conditioned 2D segmentation
